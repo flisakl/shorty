@@ -1,13 +1,14 @@
 package shorty
 
 import (
+	"database/sql"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	ut "github.com/go-playground/universal-translator"
 	"github.com/go-playground/validator/v10"
 	"github.com/jmoiron/sqlx"
-	ut "github.com/go-playground/universal-translator"
 	_ "github.com/lib/pq"
 )
 
@@ -29,13 +30,16 @@ type ErrorResponse struct {
 	FieldErrors map[string]string `json:"field_errors,omitempty"`
 }
 
+var BadJsonResponse = ErrorResponse{Code: "BAD_JSON", Message: "Submitted JSON could not be parsed"}
+var CodesTakenResponse = ErrorResponse{Code: "NO_CODE_AVAILABLE", Message: "All codes are taken, try another domain." }
+var NotFoundResponse = ErrorResponse{Code: "NOT_FOUND", Message: "Resource could not be found"}
+var TryLaterResponse = ErrorResponse{Code: "TRY_AGAIN_LATER", Message: "Server error, try again later"}
+
 type Link struct {
 	Code string `json:"code"`
 	URL  string `json:"url"`
 }
 
-var BadJsonResponse = ErrorResponse{Code: "BAD_JSON", Message: "Submitted JSON could not be parsed"}
-var CodesTakenResponse = ErrorResponse{Code: "NO_CODE_AVAILABLE", Message: "All codes are taken, try another domain." }
 
 func (s *Shorty) Add(c *gin.Context) {
 
@@ -89,11 +93,22 @@ func (s *Shorty) Add(c *gin.Context) {
 		return
 	}
 
-	resp := ErrorResponse{
-		Code: "TRY_AGAIN_LATER",
-		Message: "Server error, try again later",
+	c.JSON(http.StatusServiceUnavailable, TryLaterResponse)
+}
+
+func (s *Shorty) Get(c *gin.Context) {
+	code := c.Param("code")
+	stmt := "SELECT url FROM links WHERE code=$1"
+	var urlToRedirect string
+	err := s.db.QueryRow(stmt, code).Scan(&urlToRedirect)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, NotFoundResponse)
+		return
+	} else if err != nil {
+		c.JSON(http.StatusServiceUnavailable, TryLaterResponse)
+		return
 	}
-	c.JSON(http.StatusServiceUnavailable, resp)
+	c.Redirect(http.StatusTemporaryRedirect, urlToRedirect)
 }
 
 func (s *Shorty) SetGenerator(g Generator) {

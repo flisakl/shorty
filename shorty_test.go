@@ -69,9 +69,9 @@ func TestAddWithExistingURL(t *testing.T) {
 
 func TestAddWithExhaustedGenerator(t *testing.T) {
 	t.Cleanup(resetDB)
+	shorty := newShorty()
 	gen := NewBasicGenerator("AB", 2)
 	gen.exhausted = true
-	shorty := newShorty()
 	shorty.SetGenerator(gen)
 	eng := gin.New()
 	eng.POST("/add", shorty.Add)
@@ -84,13 +84,42 @@ func TestAddWithExhaustedGenerator(t *testing.T) {
 	assertResponseBody(t, CodesTakenResponse, w)
 }
 
+func TestGetWithExistingCode(t *testing.T) {
+	t.Cleanup(resetDB)
+	db := getTestDB()
+	shorty := newShorty()
+	eng := gin.New()
+	eng.GET("/:code", shorty.Get)
+	tc := testClient{eng}
+	stmt := "INSERT INTO links (code, url) VALUES ($1, $2)"
+	code := "aaaaaa"
+	url := "https://google.com"
+	db.MustExec(stmt, code, url)
+
+	w := tc.Get(fmt.Sprintf("/%s", code))
+
+	if !assert.Equal(t, 307, w.Code) { assert.FailNow(t, "Expected redirect") }
+	assert.Equal(t, url, w.Header()["Location"][0])
+}
+
+func TestGetWithNonExistingCode(t *testing.T) {
+	t.Cleanup(resetDB)
+	shorty := newShorty()
+	eng := gin.New()
+	eng.GET("/:code", shorty.Get)
+	tc := testClient{eng}
+	code := "aaaaaa"
+	expected := NotFoundResponse
+
+	w := tc.Get(fmt.Sprintf("/%s", code))
+
+	assert.Equal(t, 404, w.Code)
+	assertResponseBody(t, expected, w)
+}
+
 func getTestDB() *sqlx.DB {
 	if testDB == nil {
-		conn := fmt.Sprintf("sslmode=disable host=localhost user=%s password=%s dbname=%s",
-		os.Getenv("POSTGRES_USER"),
-		os.Getenv("POSTGRES_PASSWORD"),
-		os.Getenv("POSTGRES_TEST_DB"),
-		)	
+		conn := os.Getenv("GOOSE_DBSTRING")
 		var err error
 		testDB, err = sqlx.Open("postgres", conn)
 		if err != nil {
@@ -130,3 +159,9 @@ func (tc testClient) Post(url string, data map[string]any) *httptest.ResponseRec
 	return w
 }
 
+func (tc testClient) Get(url string) *httptest.ResponseRecorder {
+	w := httptest.NewRecorder()
+	request, _ := http.NewRequest("GET", url, nil)
+	tc.eng.ServeHTTP(w, request)
+	return w
+}
