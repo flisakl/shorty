@@ -1,0 +1,132 @@
+package shorty
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/jmoiron/sqlx"
+	"github.com/stretchr/testify/assert"
+	_ "github.com/joho/godotenv/autoload"
+	_ "github.com/lib/pq"
+
+)
+
+var testDB *sqlx.DB
+
+func TestMain(m *testing.M) {
+  gin.SetMode(gin.TestMode)
+  os.Exit(m.Run())
+}
+
+func newShorty() *Shorty {
+	return New(getTestDB(), NewSynchronizedGenerator(NewBasicGenerator(Alphanumeric, 6)), nil)
+}
+
+func TestAddWithProperData(t *testing.T) {
+	db := getTestDB()
+	shorty := newShorty()
+	t.Cleanup(resetDB)
+	eng := gin.New()
+	eng.POST("/add", shorty.Add)
+	tc := testClient{eng}
+
+	url := "http://google.com"
+	w := tc.Post("/add", map[string]any{"url": url})
+
+	assert.Equalf(t, 201, w.Code, "invalid response code")
+
+	var link Link = Link{Code: "qqqqqq", URL: url}
+	var dburl string
+	db.QueryRow("SELECT url from links;").Scan(&dburl)
+	assertResponseBody(t, link, w)
+	assert.Equal(t, url, link.URL)
+	assert.Equal(t, dburl, link.URL)
+}
+
+func TestAddWithExistingURL(t *testing.T) {
+	db := getTestDB()
+	shorty := newShorty()
+	t.Cleanup(resetDB)
+	eng := gin.New()
+	eng.POST("/add", shorty.Add)
+	tc := testClient{eng}
+	payload := map[string]any{"url": "http://google.com"}
+
+	tc.Post("/add", payload)
+	response := tc.Post("/add", payload)
+
+	var total_records int
+	_ = db.QueryRow("SELECT count(*) from links;").Scan(&total_records)
+	assert.Equal(t, 200, response.Code)
+	assert.Equal(t, 1, total_records)
+}
+
+func TestAddWithExhaustedGenerator(t *testing.T) {
+	t.Cleanup(resetDB)
+	gen := NewBasicGenerator("AB", 2)
+	gen.exhausted = true
+	shorty := newShorty()
+	shorty.SetGenerator(gen)
+	eng := gin.New()
+	eng.POST("/add", shorty.Add)
+	payload := map[string]any{"url": "http://google.com"}
+	tc := testClient{eng}
+
+	w := tc.Post("/add", payload)
+
+	assert.Equalf(t, 409, w.Code, "Response code does not match")
+	assertResponseBody(t, CodesTakenResponse, w)
+}
+
+func getTestDB() *sqlx.DB {
+	if testDB == nil {
+		conn := fmt.Sprintf("sslmode=disable host=localhost user=%s password=%s dbname=%s",
+		os.Getenv("POSTGRES_USER"),
+		os.Getenv("POSTGRES_PASSWORD"),
+		os.Getenv("POSTGRES_TEST_DB"),
+		)	
+		var err error
+		testDB, err = sqlx.Open("postgres", conn)
+		if err != nil {
+			panic("Could not connect to test database")
+		}
+	}
+	return testDB
+}
+
+func resetDB() {
+	testDB.MustExec("DELETE FROM links WHERE id > 0")
+}
+
+func assertResponseBody(t *testing.T, want any, got *httptest.ResponseRecorder) {
+	byte_data, _ := json.Marshal(want)
+	expectedResponse := string(byte_data)
+	body := got.Body.String()
+
+	assert.Equal(t, expectedResponse, body)
+}
+
+
+type testClient struct {
+	eng *gin.Engine
+}
+
+func (tc testClient) Post(url string, data map[string]any) *httptest.ResponseRecorder {
+	var request *http.Request
+	w := httptest.NewRecorder()
+	if data != nil {
+		js, _ := json.Marshal(data)
+		request, _ = http.NewRequest("POST", url, strings.NewReader(string(js)))
+	} else {
+		request, _ = http.NewRequest("POST", url, nil)
+	}
+	tc.eng.ServeHTTP(w, request)
+	return w
+}
+
