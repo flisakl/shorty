@@ -12,7 +12,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
-	_ "github.com/joho/godotenv/autoload"
 	_ "github.com/lib/pq"
 
 )
@@ -84,6 +83,36 @@ func TestAddWithExhaustedGenerator(t *testing.T) {
 	assertResponseBody(t, CodesTakenResponse, w)
 }
 
+func TestAddWithPopulatedDatabase(t *testing.T) {
+	t.Cleanup(resetDB)
+	db := getTestDB()
+	shorty := newShorty()
+	stmt := "INSERT INTO links (code, url) VALUES (:code, :url)"
+	eng := gin.New()
+	eng.POST("/add", shorty.Add)
+	db.NamedExec(stmt, []map[string]any{
+		{"code": "qqqqqq", "url": "https://google.com"},
+		{"code": "qqqqqw", "url": "https://reddit.com"},
+	})
+	url := "http://twitter.com"
+	payload := map[string]any{"url": url}
+	tc := testClient{eng}
+
+	w := tc.Post("/add", payload)
+
+	assert.Equal(t, 201, w.Code)
+	var link Link = Link{Code: "qqqqqf", URL: url}
+	var dburl string
+	var count int
+	db.QueryRow("SELECT url from links WHERE code=$1;", link.Code).Scan(&dburl)
+	db.QueryRow("SELECT COUNT(*) from links;").Scan(&count)
+
+	assertResponseBody(t, link, w)
+	assert.Equal(t, 3, count)
+	assert.Equal(t, url, link.URL)
+	assert.Equal(t, dburl, link.URL)
+}
+
 func TestGetWithExistingCode(t *testing.T) {
 	t.Cleanup(resetDB)
 	db := getTestDB()
@@ -119,7 +148,7 @@ func TestGetWithNonExistingCode(t *testing.T) {
 
 func getTestDB() *sqlx.DB {
 	if testDB == nil {
-		conn := os.Getenv("GOOSE_DBSTRING")
+		conn := "sslmode=disable host=localhost user=postgres password=postgres dbname=shorty"
 		var err error
 		testDB, err = sqlx.Open("postgres", conn)
 		if err != nil {

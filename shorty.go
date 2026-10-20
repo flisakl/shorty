@@ -1,6 +1,7 @@
 package shorty
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -9,7 +10,7 @@ import (
 	ut "github.com/go-playground/universal-translator"
 	"github.com/go-playground/validator/v10"
 	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 type Shorty struct {
@@ -85,15 +86,31 @@ func (s *Shorty) Add(c *gin.Context) {
 	}
 
 	link = Link{Code: code, URL: url.URL}
-	stmt := "INSERT INTO links (code, url) VALUES ($1, $2) RETURNING id;"
-	_, err = s.db.ExecContext(ctx, stmt, link.Code, link.URL)
+	err = s.insert(ctx, link.Code, link.URL)
+
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) && string(pqErr.Code) == "23505" {
+		s.UpdateGenerator()
+		code := s.generator.Get()
+		if code == "" {
+			c.JSON(http.StatusConflict, CodesTakenResponse)
+			return
+		}
+		link.Code = code
+		err = s.insert(ctx, link.Code, link.URL)
+	}
 
 	if err == nil {
 		c.JSON(http.StatusCreated, gin.H{"code": link.Code, "url": link.URL})
 		return
 	}
-
 	c.JSON(http.StatusServiceUnavailable, TryLaterResponse)
+}
+
+func (s *Shorty) insert(ctx context.Context, code, url string) error {
+	stmt := "INSERT INTO links (code, url) VALUES ($1, $2) RETURNING id;"
+	_, err := s.db.ExecContext(ctx, stmt, code, url)
+	return err
 }
 
 func (s *Shorty) Get(c *gin.Context) {
@@ -119,11 +136,13 @@ func (s *Shorty) SetGenerator(g Generator) {
 	}
 }
 
-func (s *Shorty) updateGenerator() {
+// UpdateGenerator updates generator with code from last row
+func (s *Shorty) UpdateGenerator() {
 	var link Link
-	stmt := "select code, url from links where id=(select max(id) from links);"
-	err := s.db.Select(&link, stmt)
+	stmt := "SELECT code, url FROM links ORDER BY id DESC LIMIT 1;"
+	err := s.db.Get(&link, stmt)
 	if err == nil {
 		s.generator.Update(link.Code)
+		return
 	}
 }
